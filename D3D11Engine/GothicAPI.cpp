@@ -1036,14 +1036,18 @@ void GothicAPI::ResetVobs() {
     State->VobsByVisual.clear();
     State->SkeletalVobMap.clear();
 
-    // Delete static mesh visuals
+    // Detach the entire map before destroying any visual. A visual destructor may
+    // release a Gothic visual and re-enter OnVisualDeleted(), which must not see
+    // a pointer whose MeshVisualInfo destructor is already running.
     QuickLoadTraceAPI("before static visuals");
-    for ( auto const& it : State->StaticMeshVisuals ) {
+    decltype(State->StaticMeshVisuals) staticVisualsToDelete;
+    staticVisualsToDelete.swap(State->StaticMeshVisuals);
+    for ( auto const& it : staticVisualsToDelete ) {
         QuickLoadTraceAPI("before static delete", it.second, it.first);
         delete it.second;
         QuickLoadTraceAPI("after static delete", it.second, it.first);
     }
-    State->StaticMeshVisuals.clear();
+    staticVisualsToDelete.clear();
     QuickLoadTraceAPI("after static visuals");
 
     // Delete skeletal mesh visuals
@@ -2111,8 +2115,12 @@ void GothicAPI::OnVisualDeleted( zCVisual* visual ) {
                 ++it;
             }
 
-            delete State->StaticMeshVisuals[static_cast<zCProgMeshProto*>(visual)];
-            State->StaticMeshVisuals.erase( static_cast<zCProgMeshProto*>(visual) );
+            auto staticIt = State->StaticMeshVisuals.find( static_cast<zCProgMeshProto*>(visual) );
+            if ( staticIt != State->StaticMeshVisuals.end() ) {
+                auto* doomed = staticIt->second;
+                State->StaticMeshVisuals.erase( staticIt );
+                delete doomed;
+            }
             break;
         } else if ( ext == ".MDS" || ext == ".ASC" ) {
             // We can load some MDS/ASC models as inventory objects
@@ -2133,8 +2141,9 @@ void GothicAPI::OnVisualDeleted( zCVisual* visual ) {
                     ++it;
                 }
 
-                delete State->StaticMeshVisuals[pm];
-                State->StaticMeshVisuals.erase( pm );
+                auto* doomed = vit->second;
+                State->StaticMeshVisuals.erase( vit );
+                delete doomed;
             }
 
             zCModel* zmodel = static_cast<zCModel*>(visual);
