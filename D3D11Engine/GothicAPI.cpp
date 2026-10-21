@@ -974,14 +974,28 @@ void GothicAPI::ReloadPlayerVob() {
     OnRemovedVob( player, playerHomeworld );
     OnAddVob( player, playerHomeworld );
 }
+
+// QuickLoad investigation: dedicated, immediately flushed trace.
+// Pointer values are logged without dereferencing potentially stale objects.
+static void QuickLoadTraceAPI(const char* event, const void* object = nullptr, const void* aux = nullptr) {
+    FILE* f = nullptr;
+    if (fopen_s(&f, R"(system\GD3D11\quickload_trace.log)", "a") != 0 || !f) return;
+    fprintf(f, "API tid=%lu %-32s object=%p aux=%p\n",
+        static_cast<unsigned long>(GetCurrentThreadId()), event, object, aux);
+    fflush(f);
+    fclose(f);
+}
+
 /** Resets only the vobs */
 void GothicAPI::ResetVobs() {
+    QuickLoadTraceAPI("ResetVobs BEGIN");
     
     // Pending UI item previews hold raw mesh pointers into what gets deleted below.
     // complete what ever is currently working, and clear everything else.
     Engine::WorkerThreadPool->clearAndFlush();
     if ( Engine::GraphicsEngine ) Engine::GraphicsEngine->FlushUI2D();
     if ( Engine::GraphicsEngine ) Engine::GraphicsEngine->OnVobsReset();
+    QuickLoadTraceAPI("after OnVobsReset");
 
     
     // Delete light vobs, those depend on world sections and load stuff in the background.
@@ -1023,20 +1037,29 @@ void GothicAPI::ResetVobs() {
     State->SkeletalVobMap.clear();
 
     // Delete static mesh visuals
+    QuickLoadTraceAPI("before static visuals");
     for ( auto const& it : State->StaticMeshVisuals ) {
+        QuickLoadTraceAPI("before static delete", it.second, it.first);
         delete it.second;
+        QuickLoadTraceAPI("after static delete", it.second, it.first);
     }
     State->StaticMeshVisuals.clear();
+    QuickLoadTraceAPI("after static visuals");
 
     // Delete skeletal mesh visuals
     for ( auto const& it : State->SkeletalMeshVisuals ) {
+        QuickLoadTraceAPI("before skeletal delete", it.second);
         delete it.second;
+        QuickLoadTraceAPI("after skeletal delete", it.second);
     }
     for ( auto const& it : State->SkeletalMeshNpcs ) {
+        QuickLoadTraceAPI("before NPC mesh delete", it.second, it.first);
         delete it.second;
+        QuickLoadTraceAPI("after NPC mesh delete", it.second, it.first);
     }
     State->SkeletalMeshVisuals.clear();
     State->SkeletalMeshNpcs.clear();
+    QuickLoadTraceAPI("after skeletal visuals");
 
     // Only the held references are left to hand back — clearAndFlush() above waited for every background
     // extraction and the infos they wrote into are gone. Safe inline rather than deferred: the maps are
@@ -1060,6 +1083,7 @@ void GothicAPI::ResetVobs() {
     // Every skeletal vob is gone, so this should find nothing left to own. Drops (and logs) whatever
     // is still there rather than carrying converted meshes into the next world.
     s_SharedVisualRegistry->Clear();
+    QuickLoadTraceAPI("ResetVobs END");
 }
 
 /** Called when the game loaded a new level */

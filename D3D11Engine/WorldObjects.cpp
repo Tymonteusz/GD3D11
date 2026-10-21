@@ -13,7 +13,20 @@
 #include "WorldConverter.h"
 #include "MorphGpu.h"
 
+
+// Separate trace helper so destructor progress survives a crash during implicit
+// std::map member destruction (which runs AFTER the destructor body).
+static void QuickLoadTraceMesh(const char* event, const void* object, const void* aux = nullptr) {
+    FILE* f = nullptr;
+    if (fopen_s(&f, R"(system\GD3D11\quickload_trace.log)", "a") != 0 || !f) return;
+    fprintf(f, "MESH tid=%lu %-32s object=%p aux=%p\n",
+        static_cast<unsigned long>(GetCurrentThreadId()), event, object, aux);
+    fflush(f);
+    fclose(f);
+}
+
 MeshVisualInfo::~MeshVisualInfo() {
+    QuickLoadTraceMesh("MeshVisualInfo DTOR begin", this, FullMesh);
     // Node attachments may be extracted on a worker thread (WorldConverter::ExtractNodeVisualAsync).
     // Never free the target out from under a running job.
     if ( !GetIsReady() ) {
@@ -21,13 +34,17 @@ MeshVisualInfo::~MeshVisualInfo() {
     }
     // The rest mesh is shared with every other zCMorphMesh resolving to the same rest pose.
     if ( RestVisual ) {
+        QuickLoadTraceMesh("before RestVisual release", this, RestVisual);
         s_SharedVisualRegistry->Release( RestVisual );
+        QuickLoadTraceMesh("after RestVisual release", this);
         RestVisual = nullptr;
     }
     if ( MorphMeshVisual ) {
         zCObject_Release( MorphMeshVisual );
     }
+    QuickLoadTraceMesh("before FullMesh delete", this, FullMesh);
     delete FullMesh;
+    QuickLoadTraceMesh("MeshVisualInfo DTOR body end", this);
 }
 
 SkeletalVobInfo::~SkeletalVobInfo() {
