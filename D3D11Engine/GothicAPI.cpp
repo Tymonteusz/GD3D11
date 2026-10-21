@@ -978,11 +978,11 @@ void GothicAPI::ReloadPlayerVob() {
 void GothicAPI::ResetVobs() {
     
     // Pending UI item previews hold raw mesh pointers into what gets deleted below.
+    // complete what ever is currently working, and clear everything else.
+    Engine::WorkerThreadPool->clearAndFlush();
     if ( Engine::GraphicsEngine ) Engine::GraphicsEngine->FlushUI2D();
     if ( Engine::GraphicsEngine ) Engine::GraphicsEngine->OnVobsReset();
 
-    // complete what ever is currently working, and clear everything else.
-    Engine::WorkerThreadPool->clearAndFlush();
     
     // Delete light vobs, those depend on world sections and load stuff in the background.
     // by deleting them first we block the thread until the destructor finished
