@@ -7594,6 +7594,11 @@ static void CollectVisibleVobsWithLeafCache(
 #endif // __AVX2__
 
 void GothicAPI::CollectVisibleVobs( const RndCullContext& ctx ) {
+    // Lightweight profiler for the main camera's BSP/VOB/MOB collection.
+    // One log line per 30 world passes, never one line per object.
+    const bool perfMainPass = (ctx.stage == RenderStage::STAGE_DRAW_WORLD);
+    LARGE_INTEGER perfBegin{};
+    if ( perfMainPass ) QueryPerformanceCounter( &perfBegin );
     zCBspTree* tree = LoadedWorldInfo->BspTree;
 
     zCBspBase* rootBsp = tree->GetRootNode();
@@ -7686,5 +7691,34 @@ void GothicAPI::CollectVisibleVobs( const RndCullContext& ctx ) {
         if ( ctx.extraVobs ) for ( VobInfo* it : *ctx.extraVobs ) collectListed( it );
     }
 
+    if ( perfMainPass ) {
+        LARGE_INTEGER perfEnd{}, perfFreq{};
+        QueryPerformanceCounter( &perfEnd );
+        QueryPerformanceFrequency( &perfFreq );
+        if ( perfFreq.QuadPart > 0 ) {
+            const double elapsedMs = 1000.0 * static_cast<double>(perfEnd.QuadPart - perfBegin.QuadPart) / static_cast<double>(perfFreq.QuadPart);
+            static thread_local unsigned perfSamples = 0;
+            static thread_local double perfSumMs = 0.0;
+            static thread_local double perfMaxMs = 0.0;
+            static thread_local unsigned perfPeakVobs = 0, perfPeakMobs = 0, perfPeakLights = 0;
+            perfSumMs += elapsedMs;
+            if ( elapsedMs > perfMaxMs ) perfMaxMs = elapsedMs;
+            ++perfSamples;
+            perfPeakVobs = std::max( perfPeakVobs, static_cast<unsigned>(bspVobVisitor.GetSeenVobs()) );
+            perfPeakMobs = std::max( perfPeakMobs, static_cast<unsigned>(bspVobVisitor.GetSeenMobs()) );
+            perfPeakLights = std::max( perfPeakLights, static_cast<unsigned>(bspVobVisitor.GetSeenLights()) );
+            if ( perfSamples == 30 ) {
+                FILE* perfFile = nullptr;
+                if ( fopen_s( &perfFile, R"(system\GD3D11\vob_perf_trace.log)", "a" ) == 0 && perfFile ) {
+                    fprintf( perfFile, "COLLECT main frames=%u avg_ms=%.3f max_ms=%.3f peak_vobs=%u peak_mobs=%u peak_lights=%u\n",
+                        perfSamples, perfSumMs / perfSamples, perfMaxMs, perfPeakVobs, perfPeakMobs, perfPeakLights );
+                    fclose( perfFile );
+                }
+                perfSamples = 0;
+                perfSumMs = perfMaxMs = 0.0;
+                perfPeakVobs = perfPeakMobs = perfPeakLights = 0;
+            }
+        }
+    }
     bspVobVisitor.ClearForReuse();
 }
