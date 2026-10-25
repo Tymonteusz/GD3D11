@@ -81,6 +81,84 @@
 
 namespace wrl = Microsoft::WRL;
 
+// Diagnostic only: CPU-side timings. No GPU query or forced synchronization.
+namespace FramePerfDiagnostic {
+    struct Timings {
+        double worldMs = 0.0;
+        double compileMs = 0.0;
+        double executeMs = 0.0;
+        double presentMs = 0.0;
+        double swapMs = 0.0;
+    };
+    static Timings current;
+    static Timings sum;
+    static Timings maximum;
+    static unsigned int samples = 0;
+    static LARGE_INTEGER frequency = [] { LARGE_INTEGER f{}; QueryPerformanceFrequency( &f ); return f; }();
+    static LARGE_INTEGER previousEnd{};
+    static double totalInterval = 0.0;
+    static double maxInterval = 0.0;
+
+    double Milliseconds( LARGE_INTEGER a, LARGE_INTEGER b ) {
+        return 1000.0 * static_cast<double>( b.QuadPart - a.QuadPart )
+            / static_cast<double>( frequency.QuadPart );
+    }
+
+    struct Scope {
+        double& output;
+        LARGE_INTEGER begin{};
+        explicit Scope( double& value ) : output( value ) { QueryPerformanceCounter( &begin ); }
+        ~Scope() {
+            LARGE_INTEGER end{};
+            QueryPerformanceCounter( &end );
+            output += Milliseconds( begin, end );
+        }
+    };
+
+    void FinishFrame() {
+        LARGE_INTEGER now{};
+        QueryPerformanceCounter( &now );
+        if ( previousEnd.QuadPart ) {
+            const double interval = Milliseconds( previousEnd, now );
+            totalInterval += interval;
+            maxInterval = std::max( maxInterval, interval );
+        }
+        previousEnd = now;
+
+        auto add = []( double& total, double& peak, double value ) {
+            total += value;
+            peak = std::max( peak, value );
+        };
+        add( sum.worldMs, maximum.worldMs, current.worldMs );
+        add( sum.compileMs, maximum.compileMs, current.compileMs );
+        add( sum.executeMs, maximum.executeMs, current.executeMs );
+        add( sum.presentMs, maximum.presentMs, current.presentMs );
+        add( sum.swapMs, maximum.swapMs, current.swapMs );
+        current = {};
+        if ( ++samples < 30 ) return;
+
+        FILE* log = fopen( "system\\GD3D11\\frame_perf_trace.log", "a" );
+        if ( log ) {
+            const double n = static_cast<double>( samples );
+            fprintf( log,
+                "FRAME n=%u interval_avg=%.2f interval_max=%.2f "
+                "world_avg=%.2f world_max=%.2f graph_compile_avg=%.2f "
+                "graph_execute_avg=%.2f graph_execute_max=%.2f "
+                "present_avg=%.2f present_max=%.2f swap_avg=%.2f swap_max=%.2f\n",
+                samples, totalInterval / n, maxInterval,
+                sum.worldMs / n, maximum.worldMs, sum.compileMs / n,
+                sum.executeMs / n, maximum.executeMs,
+                sum.presentMs / n, maximum.presentMs,
+                sum.swapMs / n, maximum.swapMs );
+            fclose( log );
+        }
+        sum = {};
+        maximum = {};
+        samples = 0;
+        totalInterval = maxInterval = 0.0;
+    }
+}
+
 const float DEFAULT_NOISE_NORMALMAP_STRENGTH = 0.10f;
 const float DEFAULT_NOISE_SPECULAR_STRENGTH = 0.05f;
 const XMFLOAT4 UNDERWATER_COLOR_MOD = XMFLOAT4( 0.5f, 0.7f, 1.0f, 1.0f );
@@ -1735,6 +1813,7 @@ XRESULT D3D11GraphicsEngine::OnBeginFrame() {
 
 /** Called when the game ended it's frame */
 XRESULT D3D11GraphicsEngine::OnEndFrame() {
+    FramePerfDiagnostic::FinishFrame();
     auto& renderInfo = Engine::GAPI->GetRendererState().RendererInfo;
     renderInfo.RenderStage = STAGE_DRAW_PRESENT;
     FlushUI2D();
@@ -1921,6 +2000,7 @@ void D3D11GraphicsEngine::LogDebugLayerMessages() {
 
 XRESULT D3D11GraphicsEngine::Present() {
     ZoneScoped;
+    FramePerfDiagnostic::Scope perfPresent( FramePerfDiagnostic::current.presentMs );
     const auto& settings = Engine::GAPI->GetRendererState().RendererSettings;
 
     SetViewport( ViewportInfo( 0, 0, GetBackbufferResolution() ) );
@@ -1983,10 +2063,13 @@ XRESULT D3D11GraphicsEngine::Present() {
     }
 
     HRESULT hr;
+    {
+    FramePerfDiagnostic::Scope perfSwap( FramePerfDiagnostic::current.swapMs );
     if ( m_flipWithTearing ) {
         hr = SwapChain->Present( vsync ? 1 : 0, vsync ? 0 : DXGI_PRESENT_ALLOW_TEARING );
     } else {
         hr = SwapChain->Present( vsync ? 1 : 0, 0 );
+    }
     }
 
     LogDebugLayerMessages();
@@ -3938,6 +4021,7 @@ namespace {
 /** Called when we started to render the world */
 XRESULT D3D11GraphicsEngine::OnStartWorldRendering() {
     TracyD3D11ZoneCGX( "D3D11GraphicsEngine::OnStartWorldRendering");
+    FramePerfDiagnostic::Scope perfWorld( FramePerfDiagnostic::current.worldMs );
 
     SetDefaultStates();
     m_FrameNeedsJitter = false;
@@ -4714,8 +4798,14 @@ XRESULT D3D11GraphicsEngine::OnStartWorldRendering() {
             } );
         }
 
-        graph.Compile();
-        graph.Execute();
+        {
+            FramePerfDiagnostic::Scope perfCompile( FramePerfDiagnostic::current.compileMs );
+            graph.Compile();
+        }
+        {
+            FramePerfDiagnostic::Scope perfExecute( FramePerfDiagnostic::current.executeMs );
+            graph.Execute();
+        }
 
         // Store view-projection matrix only after the rendergraph, or else parts after geometry have wrong motion vectors
         StorePrevViewProjMatrix();
