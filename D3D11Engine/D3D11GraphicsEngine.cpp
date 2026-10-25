@@ -5371,10 +5371,63 @@ void D3D11GraphicsEngine::DrawTransparencyQueue() {
 }
 
 
+// Diagnostic only: terrain CPU timings; does not change culling or rendering.
+namespace TerrainPerfDiagnostic {
+    struct Sample {
+        double total = 0, collect = 0, build = 0, sort = 0, submit = 0;
+        unsigned long long ranges = 0, entries = 0, indices = 0, draws = 0;
+    };
+    static LARGE_INTEGER frequency = [] { LARGE_INTEGER f{}; QueryPerformanceFrequency( &f ); return f; }();
+    static Sample sum{};
+    static Sample peak{};
+    static unsigned int count = 0;
+    static unsigned int depthPasses = 0;
+
+    LARGE_INTEGER Tick() { LARGE_INTEGER t{}; QueryPerformanceCounter( &t ); return t; }
+    double Ms( LARGE_INTEGER a, LARGE_INTEGER b ) {
+        return 1000.0 * double( b.QuadPart - a.QuadPart ) / double( frequency.QuadPart );
+    }
+    void Record( const Sample& s, bool depthPass ) {
+        if ( depthPass ) { ++depthPasses; return; }
+        sum.total += s.total; sum.collect += s.collect; sum.build += s.build;
+        sum.sort += s.sort; sum.submit += s.submit;
+        sum.ranges += s.ranges; sum.entries += s.entries;
+        sum.indices += s.indices; sum.draws += s.draws;
+        peak.total = std::max( peak.total, s.total );
+        peak.collect = std::max( peak.collect, s.collect );
+        peak.build = std::max( peak.build, s.build );
+        peak.sort = std::max( peak.sort, s.sort );
+        peak.submit = std::max( peak.submit, s.submit );
+        peak.ranges = std::max( peak.ranges, s.ranges );
+        peak.entries = std::max( peak.entries, s.entries );
+        peak.draws = std::max( peak.draws, s.draws );
+        if ( ++count != 30 ) return;
+        FILE* f = fopen( "system\\GD3D11\\terrain_perf_trace.log", "a" );
+        if ( f ) {
+            fprintf( f, "TERRAIN n=%u depth_calls=%u total_avg=%.3f total_max=%.3f "
+                "collect_avg=%.3f collect_max=%.3f build_avg=%.3f "
+                "sort_avg=%.3f submit_avg=%.3f submit_max=%.3f "
+                "ranges_avg=%.1f ranges_max=%llu entries_avg=%.1f entries_max=%llu "
+                "draws_avg=%.1f draws_max=%llu indices_avg=%.0f\n",
+                count, depthPasses, sum.total / count, peak.total,
+                sum.collect / count, peak.collect, sum.build / count,
+                sum.sort / count, sum.submit / count, peak.submit,
+                double( sum.ranges ) / count, peak.ranges,
+                double( sum.entries ) / count, peak.entries,
+                double( sum.draws ) / count, peak.draws,
+                double( sum.indices ) / count );
+            fclose( f );
+        }
+        sum = {}; peak = {}; count = 0; depthPasses = 0;
+    }
+}
+
 XRESULT D3D11GraphicsEngine::DrawWorldMesh( bool noTextures ) {
     if ( !Engine::GAPI->GetRendererState().RendererSettings.DrawWorldMesh )
         return XR_SUCCESS;
 
+    const LARGE_INTEGER terrainBegin = TerrainPerfDiagnostic::Tick();
+    TerrainPerfDiagnostic::Sample terrainSample{};
     ZoneScopedN( "DrawWorldMesh" );
     auto _scopeDrawWorldMesh = RecordGraphicsEvent( GE_NAME( "DrawWorldMesh" ) );
 
@@ -5432,11 +5485,14 @@ XRESULT D3D11GraphicsEngine::DrawWorldMesh( bool noTextures ) {
                 XMMatrixTranspose( XMLoadFloat4x4( &camView ) ),
                 XMLoadFloat4x4( &camProj ) );
         }
+        const auto collectBegin = TerrainPerfDiagnostic::Tick();
         Engine::GAPI->CollectVisibleMeshRanges( mainFrustum, true, m_FrameGeometryCache.visibleMeshRanges );
+        terrainSample.collect = TerrainPerfDiagnostic::Ms( collectBegin, TerrainPerfDiagnostic::Tick() );
 
         m_FrameGeometryCache.worldMeshBuilt = true;
     }
     const std::vector<MeshDrawRange>& visibleMeshRanges = m_FrameGeometryCache.visibleMeshRanges;
+    terrainSample.ranges = visibleMeshRanges.size();
 
     MeshInfo* meshInfo = Engine::GAPI->GetWrappedWorldMesh();
     BindWrappedWorldMeshPacked( meshInfo );
@@ -5460,6 +5516,7 @@ XRESULT D3D11GraphicsEngine::DrawWorldMesh( bool noTextures ) {
     GetContext()->DSSetShader( nullptr, nullptr, 0 );
     GetContext()->HSSetShader( nullptr, nullptr, 0 );
 
+    const auto buildBegin = TerrainPerfDiagnostic::Tick();
     {
         ZoneScopedN( "DrawWorldMesh::BuildMeshList" );
         auto _scopeBuildMeshList = RecordGraphicsEvent( GE_NAME( "DrawWorldMesh::BuildMeshList" ) );
@@ -5526,6 +5583,8 @@ XRESULT D3D11GraphicsEngine::DrawWorldMesh( bool noTextures ) {
             meshList.push_back( { { range.Mesh, key, range.IndexOffset, range.IndexCount }, alphaLevel, distanceSq } );
         }
     }
+    terrainSample.build = TerrainPerfDiagnostic::Ms( buildBegin, TerrainPerfDiagnostic::Tick() );
+    terrainSample.entries = meshList.size();
     constexpr float closeDistanceSq = 10000.0f * 10000.0f;
     const auto CompareMesh = []( const WorldMeshDrawEntry& a, const WorldMeshDrawEntry& b ) -> bool {
         if ( a.AlphaLevel != b.AlphaLevel )
@@ -5552,7 +5611,9 @@ XRESULT D3D11GraphicsEngine::DrawWorldMesh( bool noTextures ) {
         const auto bOffset = b.Range.Mesh->BaseIndexLocation + b.Range.IndexOffset;
         return aOffset < bOffset;
     };
+    const auto sortBegin = TerrainPerfDiagnostic::Tick();
     std::ranges::sort(meshList, CompareMesh );
+    terrainSample.sort = TerrainPerfDiagnostic::Ms( sortBegin, TerrainPerfDiagnostic::Tick() );
 
     // Draw depth only
     if ( (Engine::GAPI->GetRendererState().RendererSettings.DoZPrepass && Engine::GAPI->GetRendererState().RendererSettings.RendererMode == GothicRendererSettings::RM_Deferred )
@@ -5628,6 +5689,7 @@ XRESULT D3D11GraphicsEngine::DrawWorldMesh( bool noTextures ) {
         }
         BindMaterialFx( nullptr );
         if ( isZPrepass ) {
+            TerrainPerfDiagnostic::Record( terrainSample, true );
             return XR_SUCCESS;
         }
     }
@@ -5645,6 +5707,7 @@ XRESULT D3D11GraphicsEngine::DrawWorldMesh( bool noTextures ) {
     ActivePS->UpdateBuffer(materialInfoBuffer, &defInfo.buffer, sizeof(defInfo.buffer));
 
     // Now draw the actual pixels
+    const auto submissionBegin = TerrainPerfDiagnostic::Tick();
     zCTexture* bound = nullptr;
     if ( !meshList.empty() ) {
         ZoneScopedN( "DrawWorldMesh::OpaqueSubmission" );
@@ -5717,13 +5780,18 @@ XRESULT D3D11GraphicsEngine::DrawWorldMesh( bool noTextures ) {
                 BindMaterialFx( mesh.Range.Key.Material );
                 DrawVertexBufferIndexedUINT( nullptr, nullptr, mesh.Range.IndexCount,
                     mesh.Range.Mesh->BaseIndexLocation + mesh.Range.IndexOffset );
+                ++terrainSample.draws;
+                terrainSample.indices += mesh.Range.IndexCount;
             }
         }
         BindMaterialFx( nullptr );
     }
+    terrainSample.submit = TerrainPerfDiagnostic::Ms( submissionBegin, TerrainPerfDiagnostic::Tick() );
 
     DrawVegetationGeometryPass(Engine::GAPI->GetVegetationBoxes());
     UpdateOcclusion();
+    terrainSample.total = TerrainPerfDiagnostic::Ms( terrainBegin, TerrainPerfDiagnostic::Tick() );
+    TerrainPerfDiagnostic::Record( terrainSample, false );
     return XR_SUCCESS;
 }
 
